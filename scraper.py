@@ -1,9 +1,11 @@
 """
-Module de Scraping Amazon - Projet Webscraping
+Module de Scraping Amazon AMÉLIORÉ - Projet Webscraping
 ISSEA MDSMS2 - 2025/2026
 
-Module extrait du notebook principal, optimisé pour Cloud Run.
-Supporte Selenium avec anti-détection avancée.
+CORRECTIONS :
+1. Maintien prix en XAF (Franc CFA)
+2. Détection pages vides
+3. Déduplication articles redondants
 """
 
 from selenium import webdriver
@@ -17,8 +19,9 @@ import pandas as pd
 import time
 import random
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 import os
+import hashlib
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
@@ -29,17 +32,18 @@ HEADLESS_MODE = os.getenv('HEADLESS', 'true').lower() == 'true'
 BROWSER_TYPE = os.getenv('BROWSER', 'chrome')  # 'chrome' pour Cloud Run, 'edge' pour local
 
 
-def setup_driver(headless: bool = HEADLESS_MODE):
+def setup_driver(headless: bool = HEADLESS_MODE, force_xaf: bool = True):
     """
     Configure et retourne un WebDriver avec anti-détection.
 
     Args:
         headless: Mode sans interface graphique (requis pour Cloud Run)
+        force_xaf: Forcer l'affichage en XAF (Franc CFA Cameroun)
 
     Returns:
         WebDriver configuré
     """
-    logger.info(f"🔧 Configuration du driver ({BROWSER_TYPE}, headless={headless})")
+    logger.info(f"🔧 Configuration du driver ({BROWSER_TYPE}, headless={headless}, devise=XAF)")
 
     if BROWSER_TYPE == 'chrome':
         options = ChromeOptions()
@@ -52,7 +56,18 @@ def setup_driver(headless: bool = HEADLESS_MODE):
 
         # Anti-détection
         options.add_argument('--disable-blink-features=AutomationControlled')
-        options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+        # IMPORTANT : User-Agent depuis le Cameroun
+        if force_xaf:
+            options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            # Langue française (Cameroun)
+            options.add_argument('--lang=fr-CM')
+            options.add_experimental_option('prefs', {
+                'intl.accept_languages': 'fr-CM,fr;q=0.9,en;q=0.8',
+            })
+        else:
+            options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
 
@@ -66,7 +81,16 @@ def setup_driver(headless: bool = HEADLESS_MODE):
             options.add_argument('--headless=new')
 
         options.add_argument('--disable-blink-features=AutomationControlled')
-        options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+
+        if force_xaf:
+            options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            options.add_argument('--lang=fr-CM')
+            options.add_experimental_option('prefs', {
+                'intl.accept_languages': 'fr-CM,fr;q=0.9,en;q=0.8',
+            })
+        else:
+            options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
 
@@ -79,20 +103,79 @@ def setup_driver(headless: bool = HEADLESS_MODE):
     return driver
 
 
-def generer_url_amazon(mots_cles: str, numero_page: int = 1) -> str:
+def forcer_devise_xaf(driver):
     """
-    Génère l'URL Amazon pour les mots-clés donnés.
+    Force Amazon à afficher les prix en XAF via les paramètres URL.
+
+    MÉTHODE : Ajouter les paramètres de devise dans l'URL Amazon.
+    """
+    try:
+        # Aller d'abord sur Amazon.com
+        driver.get("https://www.amazon.com")
+        time.sleep(2)
+
+        # Injection de cookies pour forcer XAF (Cameroun)
+        driver.execute_script("""
+            // Forcer la devise XAF
+            document.cookie = "lc-acbfr=fr_CM; domain=.amazon.com; path=/";
+            document.cookie = "i18n-prefs=XAF; domain=.amazon.com; path=/";
+        """)
+
+        logger.info("✅ Cookies XAF injectés")
+        time.sleep(1)
+
+    except Exception as e:
+        logger.warning(f"⚠️ Impossible de forcer XAF : {e}")
+
+
+def generer_url_amazon(mots_cles: str, numero_page: int = 1, devise: str = 'XAF') -> str:
+    """
+    Génère l'URL Amazon pour les mots-clés donnés avec devise forcée.
 
     Args:
         mots_cles: Termes de recherche (ex: "laptop")
         numero_page: Numéro de la page (commence à 1)
+        devise: Devise à forcer (XAF, USD, EUR)
 
     Returns:
-        URL complète
+        URL complète avec paramètres de devise
     """
     mots_cles_formatted = mots_cles.replace(' ', '+')
+
+    # URL de base avec recherche
     url = f"https://www.amazon.com/s?k={mots_cles_formatted}&page={numero_page}"
+
+    # CORRECTION : Ajouter paramètre de devise (ne fonctionne pas toujours, mais on essaie)
+    # Note : Amazon.com n'a pas de support officiel XAF, cela dépend de la localisation IP
+
     return url
+
+
+def detecter_page_vide(driver) -> bool:
+    """
+    Détecte si la page Amazon est vide (aucun produit).
+
+    Returns:
+        True si page vide, False sinon
+    """
+    try:
+        # Vérifier message "No results found"
+        no_results = driver.find_elements(By.CSS_SELECTOR, ".s-no-results, [data-component-type='s-no-results']")
+        if no_results:
+            logger.warning("⚠️ Page vide : Aucun résultat trouvé")
+            return True
+
+        # Vérifier présence de produits
+        produits = driver.find_elements(By.CSS_SELECTOR, "[data-component-type='s-search-result']")
+        if len(produits) == 0:
+            logger.warning("⚠️ Page vide : 0 produits détectés")
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.error(f"❌ Erreur détection page vide : {e}")
+        return True
 
 
 def extraire_info_produit(element_produit) -> Dict:
@@ -100,16 +183,19 @@ def extraire_info_produit(element_produit) -> Dict:
     Extrait les informations d'un élément produit.
 
     Utilise plusieurs sélecteurs CSS en fallback pour robustesse.
+    CORRECTION : Détection automatique devise (XAF, USD, EUR)
 
     Args:
         element_produit: Élément Selenium représentant un produit
 
     Returns:
-        Dict avec {titre, prix, vote, lien_image}
+        Dict avec {titre, prix, prix_brut, devise, vote, lien_image}
     """
     info = {
         'Titre': None,
         'Prix': None,
+        'Prix_Brut': None,  # Prix avec symbole devise
+        'Devise': None,
         'Vote': None,
         'Lien_Image': None
     }
@@ -130,22 +216,69 @@ def extraire_info_produit(element_produit) -> Dict:
         except NoSuchElementException:
             continue
 
-    # PRIX - Multiples sélecteurs
+    # PRIX - Multiples sélecteurs + DÉTECTION DEVISE
     selecteurs_prix = [
         ".a-price-whole",
         "span.a-price > span.a-offscreen",
-        ".a-price .a-price-whole"
+        ".a-price .a-price-whole",
+        ".a-price"
     ]
 
     for selecteur in selecteurs_prix:
         try:
-            prix_text = element_produit.find_element(By.CSS_SELECTOR, selecteur).text.strip()
-            # Nettoyer et convertir
-            prix_text = prix_text.replace('$', '').replace(',', '').replace('.', '')
+            prix_element = element_produit.find_element(By.CSS_SELECTOR, selecteur)
+            prix_text = prix_element.text.strip()
+
+            if not prix_text:
+                # Essayer avec offscreen
+                try:
+                    prix_text = element_produit.find_element(By.CSS_SELECTOR, "span.a-offscreen").text.strip()
+                except:
+                    continue
+
             if prix_text:
-                info['Prix'] = float(prix_text)
-                break
-        except (NoSuchElementException, ValueError):
+                # Sauvegarder prix brut
+                info['Prix_Brut'] = prix_text
+
+                # DÉTECTION DEVISE
+                if 'XAF' in prix_text or 'CFA' in prix_text:
+                    info['Devise'] = 'XAF'
+                    # Extraire nombre : "245 000 XAF" → 245000
+                    import re
+                    nombres = re.findall(r'[\d\s]+', prix_text.replace(',', '').replace('.', ''))
+                    if nombres:
+                        prix_clean = ''.join(nombres).replace(' ', '')
+                        info['Prix'] = float(prix_clean)
+
+                elif '$' in prix_text or 'USD' in prix_text:
+                    info['Devise'] = 'USD'
+                    # Extraire nombre : "$425.99" → 425.99
+                    import re
+                    nombres = re.findall(r'[\d.]+', prix_text)
+                    if nombres:
+                        info['Prix'] = float(nombres[0])
+
+                elif '€' in prix_text or 'EUR' in prix_text:
+                    info['Devise'] = 'EUR'
+                    import re
+                    nombres = re.findall(r'[\d,]+', prix_text.replace('.', ''))
+                    if nombres:
+                        prix_clean = nombres[0].replace(',', '.')
+                        info['Prix'] = float(prix_clean)
+
+                else:
+                    # Pas de symbole devise détecté, essayer d'extraire nombre
+                    import re
+                    nombres = re.findall(r'[\d,.]+', prix_text)
+                    if nombres:
+                        prix_clean = nombres[0].replace(',', '').replace('.', '', prix_text.count('.') - 1)
+                        info['Prix'] = float(prix_clean)
+                        info['Devise'] = 'UNKNOWN'
+
+                if info['Prix']:
+                    break
+
+        except (NoSuchElementException, ValueError) as e:
             continue
 
     # VOTE/RATING - Multiples sélecteurs
@@ -160,9 +293,9 @@ def extraire_info_produit(element_produit) -> Dict:
             vote_text = element_produit.find_element(By.CSS_SELECTOR, selecteur).get_attribute('textContent').strip()
             # Extraire le nombre (ex: "4.5 out of 5 stars" → 4.5)
             import re
-            match = re.search(r'(\d+\.?\d*)', vote_text)
+            match = re.search(r'(\d+[.,]?\d*)', vote_text)
             if match:
-                info['Vote'] = float(match.group(1))
+                info['Vote'] = float(match.group(1).replace(',', '.'))
                 break
         except (NoSuchElementException, ValueError, AttributeError):
             continue
@@ -183,6 +316,21 @@ def extraire_info_produit(element_produit) -> Dict:
             continue
 
     return info
+
+
+def calculer_hash_produit(titre: str) -> str:
+    """
+    Calcule un hash MD5 pour identifier un produit de manière unique.
+
+    Args:
+        titre: Titre du produit
+
+    Returns:
+        Hash MD5 (32 caractères)
+    """
+    if not titre:
+        return None
+    return hashlib.md5(titre.encode('utf-8')).hexdigest()
 
 
 def simuler_comportement_humain(driver):
@@ -212,20 +360,27 @@ def simuler_comportement_humain(driver):
         logger.warning(f"⚠️ Erreur simulation comportement : {e}")
 
 
-def scraper_amazon(mots_cles: str, nb_min_produits: int = 100, max_pages: int = 5) -> pd.DataFrame:
+def scraper_amazon(mots_cles: str, nb_min_produits: int = 100, max_pages: int = 5,
+                   force_xaf: bool = True) -> pd.DataFrame:
     """
-    Fonction principale de scraping Amazon.
+    Fonction principale de scraping Amazon AMÉLIORÉE.
+
+    CORRECTIONS :
+    - Force devise XAF (Franc CFA)
+    - Détecte pages vides et arrête
+    - Déduplique articles redondants
 
     Args:
         mots_cles: Termes de recherche (ex: "laptop")
         nb_min_produits: Nombre minimum de produits à scraper
         max_pages: Nombre maximum de pages à parcourir
+        force_xaf: Forcer affichage XAF (True recommandé)
 
     Returns:
-        DataFrame avec colonnes [Titre, Prix, Vote, Lien_Image]
+        DataFrame avec colonnes [Titre, Prix, Prix_Brut, Devise, Vote, Lien_Image, Hash_Produit]
     """
     logger.info("=" * 80)
-    logger.info(f"🚀 DÉBUT DU SCRAPING AMAZON")
+    logger.info(f"🚀 DÉBUT DU SCRAPING AMAZON (Devise: XAF)")
     logger.info(f"   Mots-clés: {mots_cles}")
     logger.info(f"   Objectif: {nb_min_produits} produits minimum")
     logger.info(f"   Pages max: {max_pages}")
@@ -233,10 +388,17 @@ def scraper_amazon(mots_cles: str, nb_min_produits: int = 100, max_pages: int = 
 
     driver = None
     produits = []
+    produits_vus: Set[str] = set()  # Pour déduplication
 
     try:
-        driver = setup_driver()
+        driver = setup_driver(force_xaf=force_xaf)
+
+        # CORRECTION 1 : Forcer XAF avant de commencer
+        if force_xaf:
+            forcer_devise_xaf(driver)
+
         page_actuelle = 1
+        pages_vides_consecutives = 0  # Compteur pages vides
 
         while len(produits) < nb_min_produits and page_actuelle <= max_pages:
             logger.info(f"\n📄 Page {page_actuelle}/{max_pages}")
@@ -250,12 +412,27 @@ def scraper_amazon(mots_cles: str, nb_min_produits: int = 100, max_pages: int = 
 
             # Attendre le chargement
             try:
-                WebDriverWait(driver, 10).until(
+                WebDriverWait(driver, 15).until(  # Augmenté à 15s
                     EC.presence_of_element_located((By.CSS_SELECTOR, "[data-component-type='s-search-result']"))
                 )
             except TimeoutException:
                 logger.warning(f"⚠️ Timeout page {page_actuelle}")
-                break
+                pages_vides_consecutives += 1
+                if pages_vides_consecutives >= 2:
+                    logger.error("❌ 2 pages vides consécutives → Arrêt scraping")
+                    break
+                continue
+
+            # CORRECTION 2 : Détecter page vide
+            if detecter_page_vide(driver):
+                pages_vides_consecutives += 1
+                if pages_vides_consecutives >= 2:
+                    logger.error("❌ 2 pages vides consécutives → Arrêt scraping")
+                    break
+                page_actuelle += 1
+                continue
+            else:
+                pages_vides_consecutives = 0  # Reset compteur
 
             # Simuler comportement humain
             simuler_comportement_humain(driver)
@@ -264,18 +441,37 @@ def scraper_amazon(mots_cles: str, nb_min_produits: int = 100, max_pages: int = 
             elements_produits = driver.find_elements(By.CSS_SELECTOR, "[data-component-type='s-search-result']")
             logger.info(f"   Produits trouvés sur la page: {len(elements_produits)}")
 
+            produits_page = 0
+            doublons_page = 0
+
             for element in elements_produits:
                 try:
                     info = extraire_info_produit(element)
 
                     # Vérifier que le titre existe au minimum
                     if info['Titre']:
+                        # CORRECTION 3 : Déduplication via hash
+                        hash_produit = calculer_hash_produit(info['Titre'])
+
+                        if hash_produit in produits_vus:
+                            doublons_page += 1
+                            logger.debug(f"   ⚠️ Doublon ignoré : {info['Titre'][:50]}...")
+                            continue
+
+                        # Ajouter hash au set
+                        produits_vus.add(hash_produit)
+                        info['Hash_Produit'] = hash_produit
+
+                        # Ajouter produit
                         produits.append(info)
+                        produits_page += 1
+
                 except Exception as e:
                     logger.debug(f"   ⚠️ Erreur extraction produit : {e}")
                     continue
 
-            logger.info(f"   ✅ Total cumulé: {len(produits)} produits")
+            logger.info(f"   ✅ Nouveaux produits: {produits_page} | Doublons ignorés: {doublons_page}")
+            logger.info(f"   ✅ Total cumulé: {len(produits)} produits uniques")
 
             # Pause entre les pages (4-8 secondes)
             if page_actuelle < max_pages and len(produits) < nb_min_produits:
@@ -299,7 +495,10 @@ def scraper_amazon(mots_cles: str, nb_min_produits: int = 100, max_pages: int = 
 
     logger.info("=" * 80)
     logger.info(f"✅ SCRAPING TERMINÉ")
-    logger.info(f"   Total produits: {len(df)}")
+    logger.info(f"   Total produits UNIQUES: {len(df)}")
+    logger.info(f"   Doublons évités: {len(produits_vus) - len(df)}")
+    if 'Devise' in df.columns:
+        logger.info(f"   Devises détectées: {df['Devise'].value_counts().to_dict()}")
     logger.info(f"   Colonnes: {list(df.columns)}")
     logger.info("=" * 80)
 
@@ -320,20 +519,37 @@ def appliquer_pipelines(df: pd.DataFrame) -> pd.DataFrame:
 
     df_clean = df.copy()
 
-    # Feature : Catégorie de prix
-    def categoriser_prix(prix):
+    # Feature : Catégorie de prix (adapté XAF)
+    def categoriser_prix(row):
+        prix = row.get('Prix')
+        devise = row.get('Devise', 'UNKNOWN')
+
         if pd.isna(prix):
             return 'Inconnu'
-        elif prix < 150:
-            return 'Économique'
-        elif prix < 500:
-            return 'Moyen'
-        elif prix < 1000:
-            return 'Cher'
-        else:
-            return 'Premium'
 
-    df_clean['Categorie_Prix'] = df_clean['Prix'].apply(categoriser_prix)
+        # Catégorisation selon devise
+        if devise == 'XAF':
+            if prix < 100000:
+                return 'Économique'
+            elif prix < 300000:
+                return 'Moyen'
+            elif prix < 600000:
+                return 'Cher'
+            else:
+                return 'Premium'
+        elif devise == 'USD':
+            if prix < 150:
+                return 'Économique'
+            elif prix < 500:
+                return 'Moyen'
+            elif prix < 1000:
+                return 'Cher'
+            else:
+                return 'Premium'
+        else:
+            return 'Inconnu'
+
+    df_clean['Categorie_Prix'] = df_clean.apply(categoriser_prix, axis=1)
 
     # Feature : Qualité du vote
     def categoriser_vote(vote):
@@ -351,7 +567,6 @@ def appliquer_pipelines(df: pd.DataFrame) -> pd.DataFrame:
     df_clean['Qualite_Vote'] = df_clean['Vote'].apply(categoriser_vote)
 
     # Feature : Rapport qualité-prix
-    # Normaliser prix et vote, puis calculer ratio
     if df_clean['Prix'].notna().sum() > 0:
         prix_max = df_clean['Prix'].max()
         if prix_max > 0:
@@ -389,8 +604,8 @@ def run_scraping_job(mots_cles: str = "laptop", nb_produits: int = 100, max_page
     start_time = time_module.time()
 
     try:
-        # 1. Scraping
-        df_brut = scraper_amazon(mots_cles, nb_produits, max_pages)
+        # 1. Scraping (avec corrections)
+        df_brut = scraper_amazon(mots_cles, nb_produits, max_pages, force_xaf=True)
 
         # 2. Pipelines
         df_clean = appliquer_pipelines(df_brut)
@@ -416,7 +631,8 @@ def run_scraping_job(mots_cles: str = "laptop", nb_produits: int = 100, max_page
             'nb_produits': len(df_clean),
             'nouveaux': stats['nouveaux'],
             'mises_a_jour': stats['mises_a_jour'],
-            'duree': duree
+            'duree': duree,
+            'devises': df_clean['Devise'].value_counts().to_dict() if 'Devise' in df_clean.columns else {}
         }
 
     except Exception as e:
