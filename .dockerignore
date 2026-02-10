@@ -1,0 +1,58 @@
+# ============================================
+# .dockerignore - Projet Amazon Webscraping
+# ISSEA MDSMS2 - 2025/2026
+# ============================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Données locales
+*.csv
+*.db
+*.sqlite
+*.sqlite3
+scraping_auto/
+data/
+
+# Documentation
+*.md
+*.pdf
+*.txt
+!requirements.txt
+
+# Git
+.git/
+.gitignore
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cloud
+.gcloudignore
+.env
+.env.local
