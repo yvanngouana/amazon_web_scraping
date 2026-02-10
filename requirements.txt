@@ -1,0 +1,27 @@
+# ============================================
+# Requirements - Projet Amazon Webscraping
+# ISSEA MDSMS2 - 2025/2026
+# ============================================
+
+# Web Scraping
+selenium==4.16.0
+webdriver-manager==4.0.1
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.3
+
+# Visualization
+plotly==5.18.0
+
+# Dashboard
+streamlit==1.29.0
+
+# Scheduling
+APScheduler==3.10.4
+
+# Utilities
+python-dotenv==1.0.0
+
+# Cloud (pour déploiement)
+psycopg2-binary==2.9.9
